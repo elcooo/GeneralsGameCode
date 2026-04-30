@@ -55,16 +55,10 @@
 #include "GameLogic/ScriptEngine.h"
 #include "GameLogic/Module/ProductionUpdate.h"
 #include "GameClient/TerrainVisual.h"
-#include "GameClient/Display.h"
-#include "GameClient/DisplayStringManager.h"
-#include "GameClient/GameWindowManager.h"
-#include "GameClient/GlobalLanguage.h"
 #include "Common/PlayerList.h"
 #include "Common/GameCommon.h"
 
 #include <string>
-#include <deque>
-#include <vector>
 
 #define USE_DOZER 1
 
@@ -108,29 +102,6 @@ static std::string escapeAiEventValue(const UnicodeString& value)
 	return escapeAiEventValue(ascii);
 }
 
-// --- In-memory overlay ring buffer (last N events per AI player) -------------
-static const size_t AI_OVERLAY_MAX_LINES = 10;
-static std::deque<std::string> g_aiOverlayEvents[MAX_PLAYER_COUNT];
-static std::vector<int> g_aiOverlayPlayerOrder;
-
-static void pushAiOverlayLine(int playerIndex, const std::string& line)
-{
-	if (playerIndex < 0 || playerIndex >= MAX_PLAYER_COUNT)
-		return;
-	std::deque<std::string>& dq = g_aiOverlayEvents[playerIndex];
-	if (dq.empty())
-	{
-		bool found = false;
-		for (size_t i = 0; i < g_aiOverlayPlayerOrder.size(); ++i)
-			if (g_aiOverlayPlayerOrder[i] == playerIndex) { found = true; break; }
-		if (!found)
-			g_aiOverlayPlayerOrder.push_back(playerIndex);
-	}
-	dq.push_back(line);
-	while (dq.size() > AI_OVERLAY_MAX_LINES)
-		dq.pop_front();
-}
-
 static void appendAiActionEvent(Player *player, const char *eventName, const std::string& detailsJson)
 {
 	if (player == nullptr || TheGlobalData == nullptr || TheGameLogic == nullptr || eventName == nullptr)
@@ -153,84 +124,6 @@ static void appendAiActionEvent(Player *player, const char *eventName, const std
 			detailsJson.c_str());
 		fflush(fp);
 		fclose(fp);
-	}
-
-	// Also push a compact line into the on-screen overlay ring buffer.
-	char header[48];
-	sprintf(header, "f%d ", TheGameLogic->getFrame());
-	std::string compact = header;
-	compact += eventName;
-	if (!detailsJson.empty())
-	{
-		compact += ' ';
-		compact += detailsJson;
-	}
-	pushAiOverlayLine(player->getPlayerIndex(), compact);
-}
-
-// --- Drawing: called from InGameUI::draw --------------------------------------
-void AiEventOverlay_Draw()
-{
-	if (TheDisplay == NULL || TheDisplayStringManager == NULL
-		|| TheWindowManager == NULL || TheGlobalLanguageData == NULL)
-		return;
-	if (g_aiOverlayPlayerOrder.empty())
-		return;
-
-	static const int MAX_PANELS = 2;
-	static DisplayString *s_lines[MAX_PANELS][AI_OVERLAY_MAX_LINES + 1] = { { NULL } };
-	static GameFont *s_font = NULL;
-
-	if (s_font == NULL)
-	{
-		Int sz = TheGlobalLanguageData->adjustFontSize(11);
-		s_font = TheWindowManager->winFindFont(AsciiString("Arial"), sz, FALSE);
-	}
-	if (s_font == NULL)
-		return;
-
-	Color textColor = GameMakeColor(255, 220, 120, 230);
-	Color dropColor = GameMakeColor(0, 0, 0, 255);
-
-	Int screenW = TheDisplay->getWidth();
-	Int screenH = TheDisplay->getHeight();
-	Int lineH   = 14;
-
-	int panels = (int)g_aiOverlayPlayerOrder.size();
-	if (panels > MAX_PANELS) panels = MAX_PANELS;
-
-	for (int p = 0; p < panels; ++p)
-	{
-		int playerIndex = g_aiOverlayPlayerOrder[p];
-		Int baseX = (p == 0) ? 8 : (screenW / 2 + 8);
-		Int baseY = (Int)(screenH * 0.35f);
-
-		// Header line
-		if (s_lines[p][0] == NULL)
-			s_lines[p][0] = TheDisplayStringManager->newDisplayString();
-		s_lines[p][0]->setFont(s_font);
-
-		char hdrBuf[96];
-		sprintf(hdrBuf, "AI %d (slot %d)", p + 1, playerIndex);
-		AsciiString hdrA(hdrBuf);
-		UnicodeString hdrU; hdrU.translate(hdrA);
-		s_lines[p][0]->setText(hdrU);
-		s_lines[p][0]->draw(baseX, baseY, textColor, dropColor);
-
-		std::deque<std::string>& dq = g_aiOverlayEvents[playerIndex];
-		size_t i = 0;
-		for (std::deque<std::string>::iterator it = dq.begin();
-			it != dq.end() && i < AI_OVERLAY_MAX_LINES; ++it, ++i)
-		{
-			if (s_lines[p][i + 1] == NULL)
-				s_lines[p][i + 1] = TheDisplayStringManager->newDisplayString();
-			s_lines[p][i + 1]->setFont(s_font);
-
-			AsciiString a(it->c_str());
-			UnicodeString u; u.translate(a);
-			s_lines[p][i + 1]->setText(u);
-			s_lines[p][i + 1]->draw(baseX, baseY + lineH * (Int)(i + 1), textColor, dropColor);
-		}
 	}
 }
 
@@ -1490,4 +1383,3 @@ void AISkirmishPlayer::loadPostProcess()
 {
 
 }
-
