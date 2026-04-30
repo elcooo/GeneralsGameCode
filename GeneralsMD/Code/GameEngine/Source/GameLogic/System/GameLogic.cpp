@@ -138,6 +138,60 @@ extern void externalAddTree(Coord3D location, Real scale, Real angle, AsciiStrin
 // I'm making this larger now that we know how big our maps are going to be.
 enum { OBJ_HASH_SIZE	= 8192 };
 
+static const char *getSkirmishSlotStateName(SlotState state)
+{
+	switch (state)
+	{
+		case SLOT_OPEN: return "open";
+		case SLOT_CLOSED: return "closed";
+		case SLOT_EASY_AI: return "easy_ai";
+		case SLOT_MED_AI: return "medium_ai";
+		case SLOT_BRUTAL_AI: return "brutal_ai";
+		case SLOT_PLAYER: return "player";
+		default: return "unknown";
+	}
+}
+
+static void appendSkirmishStartupLog(GameInfo *gameInfo)
+{
+	if (gameInfo == nullptr || TheGlobalData == nullptr)
+		return;
+
+	AsciiString logPath = TheGlobalData->getPath_UserData();
+	logPath.concat("SkirmishCodeTest.log");
+
+	FILE *fp = fopen(logPath.str(), "a");
+	if (fp == nullptr)
+		return;
+
+	fprintf(fp, "=== Skirmish init ===\n");
+	fprintf(fp, "map=%s local_slot=%d\n", TheGlobalData->m_mapName.str(), gameInfo->getLocalSlotNum());
+
+	for (Int i = 0; i < MAX_SLOTS; ++i)
+	{
+		GameSlot *slot = gameInfo->getSlot(i);
+		if (slot == nullptr || !slot->isOccupied())
+			continue;
+
+		AsciiString slotName;
+		slotName.translate(slot->getName());
+
+		fprintf(fp,
+			"slot=%d state=%s human=%d ai=%d team=%d start=%d color=%d name=%s\n",
+			i,
+			getSkirmishSlotStateName(slot->getState()),
+			slot->isHuman() ? 1 : 0,
+			slot->isAI() ? 1 : 0,
+			slot->getTeamNumber(),
+			slot->getStartPos(),
+			slot->getColor(),
+			slotName.str());
+	}
+
+	fprintf(fp, "\n");
+	fclose(fp);
+}
+
 /// The GameLogic singleton instance
 GameLogic *TheGameLogic = nullptr;
 
@@ -1294,6 +1348,11 @@ void GameLogic::startNewGame( Bool loadingSaveGame )
 
 	populateRandomSideAndColor( TheGameInfo );
 	populateRandomStartPosition( TheGameInfo );
+
+	if (m_gameMode == GAME_SKIRMISH && !loadingSaveGame)
+	{
+		appendSkirmishStartupLog(TheGameInfo);
+	}
 
 	//****************************//
 	// Start the LoadScreen Now!	//

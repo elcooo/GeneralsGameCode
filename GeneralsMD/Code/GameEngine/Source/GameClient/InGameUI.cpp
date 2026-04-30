@@ -3787,6 +3787,13 @@ void InGameUI::postWindowDraw()
 	{
 		drawPlayerInfoList();
 	}
+
+	// AI event overlay: last N events per skirmish AI player, split left/right.
+	extern void AiEventOverlay_Draw();
+	if (TheGameLogic && TheGameLogic->isInGame() && !TheGameLogic->isInShellGame())
+	{
+		AiEventOverlay_Draw();
+	}
 }
 
 //-------------------------------------------------------------------------------------------------

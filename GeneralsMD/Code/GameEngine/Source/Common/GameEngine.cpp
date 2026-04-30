@@ -225,6 +225,7 @@ static void updateWindowTitle()
 		if (!title.isEmpty())
 			title.concat(L" ");
 		title.concat(gameTitleFinal.str());
+		title.concat(L" [Code Test]");
 		title.concat(L" ");
 		title.concat(gameVersion.str());
 	}
@@ -887,6 +888,13 @@ Bool GameEngine::canUpdateRegularGameLogic()
 /// -----------------------------------------------------------------------------------------------
 DECLARE_PERF_TIMER(GameEngine_update)
 
+static const char *s_gameEngineUpdatePhase = "before update";
+
+static void setGameEngineUpdatePhase(const char *phase)
+{
+	s_gameEngineUpdatePhase = phase;
+}
+
 /** -----------------------------------------------------------------------------------------------
  * Update the game engine by updating the GameClient and GameLogic singletons.
  */
@@ -896,37 +904,48 @@ void GameEngine::update()
 	{
 		{
 			// VERIFY CRC needs to be in this code block.  Please to not pull TheGameLogic->update() inside this block.
+			setGameEngineUpdatePhase("VERIFY_CRC");
 			VERIFY_CRC
 
+			setGameEngineUpdatePhase("TheRadar->UPDATE");
 			TheRadar->UPDATE();
 
 			/// @todo Move audio init, update, etc, into GameClient update
 
+			setGameEngineUpdatePhase("TheAudio->UPDATE");
 			TheAudio->UPDATE();
+			setGameEngineUpdatePhase("TheGameClient->UPDATE");
 			TheGameClient->UPDATE();
+			setGameEngineUpdatePhase("TheMessageStream->propagateMessages");
 			TheMessageStream->propagateMessages();
 
 			if (TheNetwork != nullptr)
 			{
+				setGameEngineUpdatePhase("TheNetwork->UPDATE");
 				TheNetwork->UPDATE();
 			}
 		}
 
+		setGameEngineUpdatePhase("canUpdateGameLogic");
 		const Bool canUpdate = canUpdateGameLogic();
 		const Bool canUpdateLogic = canUpdate && !TheFramePacer->isGameHalted() && !TheFramePacer->isTimeFrozen();
 		const Bool canUpdateScript = canUpdate && !TheFramePacer->isGameHalted();
 
 		if (canUpdateLogic)
 		{
+			setGameEngineUpdatePhase("TheGameClient->step");
 			TheGameClient->step();
+			setGameEngineUpdatePhase("TheGameLogic->UPDATE");
 			TheGameLogic->UPDATE();
 		}
 		else if (canUpdateScript)
 		{
 			// TheSuperHackers @info Still update the Script Engine to allow
 			// for scripted camera movements while the time is frozen.
+			setGameEngineUpdatePhase("TheScriptEngine->UPDATE");
 			TheScriptEngine->UPDATE();
 		}
+		setGameEngineUpdatePhase("after update");
 	}
 }
 
@@ -989,8 +1008,11 @@ void GameEngine::execute()
 					// Release CRASH doesn't return, so don't worry about executing additional code.
 					if (e.mFailureMessage)
 						RELEASE_CRASH((e.mFailureMessage));
-					else
-						RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
+					else {
+						char reason[256];
+						snprintf(reason, ARRAY_SIZE(reason), "Uncaught Exception in GameEngine::update phase=%s", s_gameEngineUpdatePhase);
+						RELEASE_CRASH((reason));
+					}
 				}
 				catch (...)
 				{
@@ -1003,7 +1025,9 @@ void GameEngine::execute()
 					catch (...)
 					{
 					}
-					RELEASE_CRASH(("Uncaught Exception in GameEngine::update"));
+					char reason[256];
+					snprintf(reason, ARRAY_SIZE(reason), "Uncaught Exception in GameEngine::update phase=%s", s_gameEngineUpdatePhase);
+					RELEASE_CRASH((reason));
 				}
 			}
 

@@ -80,6 +80,7 @@
 #include "GameLogic/AI.h"
 #include "GameLogic/AIPathfind.h"
 #include "GameLogic/AISkirmishPlayer.h"
+#include "GameLogic/ExternalAIPlayer.h"
 #include "GameLogic/ExperienceTracker.h"
 #include "GameLogic/Object.h"
 #include "GameLogic/Scripts.h"
@@ -744,13 +745,22 @@ void Player::setPlayerType(PlayerType t, Bool skirmish)
 
 	if (t == PLAYER_COMPUTER)
 	{
-		if (skirmish || TheAI->getAiData()->m_forceSkirmishAI) {
+		if (ExternalAIPlayer::isEnabledByEnv()) {
+			// driven by an external tool via UserData/AiState_p*.json + AiCommands_p*.txt
+			m_ai = newInstance(ExternalAIPlayer)( this );
+		} else if (skirmish || TheAI->getAiData()->m_forceSkirmishAI) {
 			// create AIPlayer and attach to this Player
 			m_ai = newInstance(AISkirmishPlayer)( this );
 		} else {
 			// create AIPlayer and attach to this Player
 			m_ai = newInstance(AIPlayer)( this );
 		}
+	}
+	else if (t == PLAYER_HUMAN && ExternalAIPlayer::isEnabledByEnv())
+	{
+		// Keep the slot human for the UI/player identity, but expose the same
+		// external state/command bridge so tools can drive the local player.
+		m_ai = newInstance(ExternalAIPlayer)( this );
 	}
 }
 

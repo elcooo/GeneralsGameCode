@@ -55,7 +55,16 @@
 #include "GameLogic/ScriptEngine.h"
 #include "GameLogic/Module/ProductionUpdate.h"
 #include "GameClient/TerrainVisual.h"
+#include "GameClient/Display.h"
+#include "GameClient/DisplayStringManager.h"
+#include "GameClient/GameWindowManager.h"
+#include "GameClient/GlobalLanguage.h"
+#include "Common/PlayerList.h"
+#include "Common/GameCommon.h"
 
+#include <string>
+#include <deque>
+#include <vector>
 
 #define USE_DOZER 1
 
@@ -64,6 +73,166 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // PRIVATE DATA ///////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////////////////
+
+static std::string escapeAiEventValue(const char *value)
+{
+	std::string result;
+	if (value == nullptr)
+		return result;
+
+	while (*value)
+	{
+		switch (*value)
+		{
+			case '\\': result += "\\\\"; break;
+			case '\"': result += "\\\""; break;
+			case '\r':
+			case '\n': result += ' '; break;
+			default: result += *value; break;
+		}
+		++value;
+	}
+
+	return result;
+}
+
+static std::string escapeAiEventValue(const AsciiString& value)
+{
+	return escapeAiEventValue(value.str());
+}
+
+static std::string escapeAiEventValue(const UnicodeString& value)
+{
+	AsciiString ascii;
+	ascii.translate(value);
+	return escapeAiEventValue(ascii);
+}
+
+// --- In-memory overlay ring buffer (last N events per AI player) -------------
+static const size_t AI_OVERLAY_MAX_LINES = 10;
+static std::deque<std::string> g_aiOverlayEvents[MAX_PLAYER_COUNT];
+static std::vector<int> g_aiOverlayPlayerOrder;
+
+static void pushAiOverlayLine(int playerIndex, const std::string& line)
+{
+	if (playerIndex < 0 || playerIndex >= MAX_PLAYER_COUNT)
+		return;
+	std::deque<std::string>& dq = g_aiOverlayEvents[playerIndex];
+	if (dq.empty())
+	{
+		bool found = false;
+		for (size_t i = 0; i < g_aiOverlayPlayerOrder.size(); ++i)
+			if (g_aiOverlayPlayerOrder[i] == playerIndex) { found = true; break; }
+		if (!found)
+			g_aiOverlayPlayerOrder.push_back(playerIndex);
+	}
+	dq.push_back(line);
+	while (dq.size() > AI_OVERLAY_MAX_LINES)
+		dq.pop_front();
+}
+
+static void appendAiActionEvent(Player *player, const char *eventName, const std::string& detailsJson)
+{
+	if (player == nullptr || TheGlobalData == nullptr || TheGameLogic == nullptr || eventName == nullptr)
+		return;
+
+	AsciiString logPath = TheGlobalData->getPath_UserData();
+	logPath.concat("AiActionStream.ndjson");
+
+	FILE *fp = fopen(logPath.str(), "a");
+	if (fp != nullptr)
+	{
+		fprintf(
+			fp,
+			"{\"frame\":%d,\"playerIndex\":%d,\"player\":\"%s\",\"event\":\"%s\"%s%s}\n",
+			TheGameLogic->getFrame(),
+			player->getPlayerIndex(),
+			escapeAiEventValue(player->getPlayerDisplayName()).c_str(),
+			eventName,
+			detailsJson.empty() ? "" : ",",
+			detailsJson.c_str());
+		fflush(fp);
+		fclose(fp);
+	}
+
+	// Also push a compact line into the on-screen overlay ring buffer.
+	char header[48];
+	sprintf(header, "f%d ", TheGameLogic->getFrame());
+	std::string compact = header;
+	compact += eventName;
+	if (!detailsJson.empty())
+	{
+		compact += ' ';
+		compact += detailsJson;
+	}
+	pushAiOverlayLine(player->getPlayerIndex(), compact);
+}
+
+// --- Drawing: called from InGameUI::draw --------------------------------------
+void AiEventOverlay_Draw()
+{
+	if (TheDisplay == NULL || TheDisplayStringManager == NULL
+		|| TheWindowManager == NULL || TheGlobalLanguageData == NULL)
+		return;
+	if (g_aiOverlayPlayerOrder.empty())
+		return;
+
+	static const int MAX_PANELS = 2;
+	static DisplayString *s_lines[MAX_PANELS][AI_OVERLAY_MAX_LINES + 1] = { { NULL } };
+	static GameFont *s_font = NULL;
+
+	if (s_font == NULL)
+	{
+		Int sz = TheGlobalLanguageData->adjustFontSize(11);
+		s_font = TheWindowManager->winFindFont(AsciiString("Arial"), sz, FALSE);
+	}
+	if (s_font == NULL)
+		return;
+
+	Color textColor = GameMakeColor(255, 220, 120, 230);
+	Color dropColor = GameMakeColor(0, 0, 0, 255);
+
+	Int screenW = TheDisplay->getWidth();
+	Int screenH = TheDisplay->getHeight();
+	Int lineH   = 14;
+
+	int panels = (int)g_aiOverlayPlayerOrder.size();
+	if (panels > MAX_PANELS) panels = MAX_PANELS;
+
+	for (int p = 0; p < panels; ++p)
+	{
+		int playerIndex = g_aiOverlayPlayerOrder[p];
+		Int baseX = (p == 0) ? 8 : (screenW / 2 + 8);
+		Int baseY = (Int)(screenH * 0.35f);
+
+		// Header line
+		if (s_lines[p][0] == NULL)
+			s_lines[p][0] = TheDisplayStringManager->newDisplayString();
+		s_lines[p][0]->setFont(s_font);
+
+		char hdrBuf[96];
+		sprintf(hdrBuf, "AI %d (slot %d)", p + 1, playerIndex);
+		AsciiString hdrA(hdrBuf);
+		UnicodeString hdrU; hdrU.translate(hdrA);
+		s_lines[p][0]->setText(hdrU);
+		s_lines[p][0]->draw(baseX, baseY, textColor, dropColor);
+
+		std::deque<std::string>& dq = g_aiOverlayEvents[playerIndex];
+		size_t i = 0;
+		for (std::deque<std::string>::iterator it = dq.begin();
+			it != dq.end() && i < AI_OVERLAY_MAX_LINES; ++it, ++i)
+		{
+			if (s_lines[p][i + 1] == NULL)
+				s_lines[p][i + 1] = TheDisplayStringManager->newDisplayString();
+			s_lines[p][i + 1]->setFont(s_font);
+
+			AsciiString a(it->c_str());
+			UnicodeString u; u.translate(a);
+			s_lines[p][i + 1]->setText(u);
+			s_lines[p][i + 1]->draw(baseX, baseY + lineH * (Int)(i + 1), textColor, dropColor);
+		}
+	}
+}
 
 AISkirmishPlayer::AISkirmishPlayer( Player *p ) :	AIPlayer(p),
 m_curFlankBaseDefense(0),
@@ -255,6 +424,11 @@ void AISkirmishPlayer::processBaseBuilding()
 			{
 				bldgInfo->setObjectID( bldg->getID() );
 				bldgInfo->decrementNumRebuilds();
+				appendAiActionEvent(
+					m_player,
+					"structure_started",
+					"\"building\":\"" + escapeAiEventValue(bldgPlan->getName()) + "\","
+					"\"objectId\":" + std::to_string((int)bldg->getID()));
 
 				m_readyToBuildStructure = false;
 				m_structureTimer = TheAI->getAiData()->m_structureSeconds*LOGICFRAMES_PER_SECOND;
@@ -313,6 +487,15 @@ void AISkirmishPlayer::processBaseBuilding()
 void AISkirmishPlayer::onUnitProduced( Object *factory, Object *unit )
 {
 	AIPlayer::onUnitProduced(factory, unit);
+
+	AsciiString factoryName = factory ? factory->getTemplate()->getName() : "<none>";
+	AsciiString unitName = unit ? unit->getTemplate()->getName() : "<none>";
+
+	appendAiActionEvent(
+		m_player,
+		"unit_produced",
+		"\"factory\":\"" + escapeAiEventValue(factoryName) + "\","
+		"\"unit\":\"" + escapeAiEventValue(unitName) + "\"");
 }
 
 /**
@@ -336,9 +519,23 @@ Bool AISkirmishPlayer::startTraining( WorkOrder *order, Bool busyOK, AsciiString
 				teamStr.concat(teamName);
 				TheScriptEngine->AppendDebugMessage(teamStr, false);
 			}
+			appendAiActionEvent(
+				m_player,
+				"train_queued",
+				"\"unit\":\"" + escapeAiEventValue(order->m_thing->getName()) + "\","
+				"\"factory\":\"" + escapeAiEventValue(factory->getTemplate()->getName()) + "\","
+				"\"team\":\"" + escapeAiEventValue(teamName) + "\","
+				"\"busyOk\":" + std::string(busyOK ? "true" : "false"));
 			return true;
 		}
 	}
+
+	appendAiActionEvent(
+		m_player,
+		"train_failed",
+		"\"unit\":\"" + escapeAiEventValue(order && order->m_thing ? order->m_thing->getName() : AsciiString("<none>")) + "\","
+		"\"team\":\"" + escapeAiEventValue(teamName) + "\","
+		"\"busyOk\":" + std::string(busyOK ? "true" : "false"));
 
 	return FALSE;
 
@@ -441,6 +638,10 @@ void AISkirmishPlayer::buildSpecificAIBuilding(const AsciiString &thingName)
 		buildingStr.concat(thingName);
 		buildingStr.concat("' for construction.");
 		TheScriptEngine->AppendDebugMessage(buildingStr, false);
+		appendAiActionEvent(
+			m_player,
+			"building_priority_queued",
+			"\"building\":\"" + escapeAiEventValue(thingName) + "\"");
 	}	else if (found) {
 		AsciiString buildingStr = "Warning - all instances of building '";
 		buildingStr.concat(thingName);
@@ -537,6 +738,11 @@ void AISkirmishPlayer::acquireEnemy()
 		msg.concat(" acquiring target enemy player: ");
 		msg.concat(TheNameKeyGenerator->keyToName(m_currentEnemy->getPlayerNameKey()));
 		TheScriptEngine->AppendDebugMessage( msg, false);
+		appendAiActionEvent(
+			m_player,
+			"enemy_acquired",
+			"\"enemyIndex\":" + std::to_string(m_currentEnemy->getPlayerIndex()) + ","
+			"\"enemy\":\"" + escapeAiEventValue(m_currentEnemy->getPlayerDisplayName()) + "\"");
 	}
 }
 
@@ -701,6 +907,13 @@ void AISkirmishPlayer::buildAIBaseDefenseStructure(const AsciiString &thingName,
 		}
 		if (canBuild) {
 			m_player->addToPriorityBuildList(thingName, &buildPos, placeAngle);
+			appendAiActionEvent(
+				m_player,
+				"base_defense_queued",
+				"\"building\":\"" + escapeAiEventValue(thingName) + "\","
+				"\"flank\":" + std::string(flank ? "true" : "false") + ","
+				"\"x\":" + std::to_string((int)buildPos.x) + ","
+				"\"y\":" + std::to_string((int)buildPos.y));
 			break;
 		}
 	}	while (true);
@@ -739,6 +952,14 @@ Bool AISkirmishPlayer::checkBridges(Object *unit, Waypoint *way)
 	*/
 void AISkirmishPlayer::buildSpecificAITeam( TeamPrototype *teamProto, Bool priorityBuild)
 {
+	if (teamProto)
+	{
+		appendAiActionEvent(
+			m_player,
+			"team_build_requested",
+			"\"team\":\"" + escapeAiEventValue(teamProto->getName()) + "\","
+			"\"priority\":" + std::string(priorityBuild ? "true" : "false"));
+	}
 	AIPlayer::buildSpecificAITeam(teamProto, priorityBuild);
 }
 
@@ -748,6 +969,15 @@ void AISkirmishPlayer::buildSpecificAITeam( TeamPrototype *teamProto, Bool prior
 	*/
 void AISkirmishPlayer::recruitSpecificAITeam(TeamPrototype *teamProto, Real recruitRadius)
 {
+	if (teamProto)
+	{
+		appendAiActionEvent(
+			m_player,
+			"team_recruit_requested",
+			"\"team\":\"" + escapeAiEventValue(teamProto->getName()) + "\","
+			"\"radius\":" + std::to_string((int)recruitRadius));
+	}
+
 	if (recruitRadius < 1) recruitRadius = 99999.0f;
 	//
 	// Create "Team in queue" based on team population
@@ -834,6 +1064,11 @@ void AISkirmishPlayer::recruitSpecificAITeam(TeamPrototype *teamProto, Real recr
 			AsciiString teamName = teamProto->getName();
 			teamName.concat(" - Finished recruiting.");
 			TheScriptEngine->AppendDebugMessage(teamName, false);
+			appendAiActionEvent(
+				m_player,
+				"team_recruited",
+				"\"team\":\"" + escapeAiEventValue(teamProto->getName()) + "\","
+				"\"units\":" + std::to_string(unitsRecruited));
 		}	else {
 			//disband.
 			if (!theTeam->getPrototype()->getIsSingleton()) {
@@ -843,6 +1078,10 @@ void AISkirmishPlayer::recruitSpecificAITeam(TeamPrototype *teamProto, Real recr
 			AsciiString teamName = teamProto->getName();
 			teamName.concat(" - Recruited 0 units, disbanding.");
 			TheScriptEngine->AppendDebugMessage(teamName, false);
+			appendAiActionEvent(
+				m_player,
+				"team_recruit_empty",
+				"\"team\":\"" + escapeAiEventValue(teamProto->getName()) + "\"");
 		}
 	}
 }
@@ -1131,6 +1370,7 @@ Object * AISkirmishPlayer::findDozer( const Coord3D *pos )
  */
 Bool AISkirmishPlayer::computeSuperweaponTarget(const SpecialPowerTemplate *power, Coord3D *retPos, Int playerNdx, Real weaponRadius)
 {
+	Bool foundTarget = FALSE;
 
 	Region2D bounds;
 	getPlayerStructureBounds(&bounds, playerNdx);
@@ -1168,10 +1408,28 @@ Bool AISkirmishPlayer::computeSuperweaponTarget(const SpecialPowerTemplate *powe
 		retPos->x += offset.x;
 		retPos->y += offset.y;
 		retPos->z = TheTerrainLogic->getGroundHeight(retPos->x, retPos->y);
-		return TRUE;
+		foundTarget = TRUE;
+		appendAiActionEvent(
+			m_player,
+			"superweapon_target_found",
+			"\"power\":\"" + escapeAiEventValue(power->getName()) + "\","
+			"\"targetPlayer\":" + std::to_string(playerNdx) + ","
+			"\"x\":" + std::to_string((int)retPos->x) + ","
+			"\"y\":" + std::to_string((int)retPos->y) + ","
+			"\"radius\":" + std::to_string((int)weaponRadius));
+		return foundTarget;
 	}
 
-	return AIPlayer::computeSuperweaponTarget(power, retPos, playerNdx, weaponRadius);
+	foundTarget = AIPlayer::computeSuperweaponTarget(power, retPos, playerNdx, weaponRadius);
+	appendAiActionEvent(
+		m_player,
+		foundTarget ? "superweapon_target_found" : "superweapon_target_failed",
+		"\"power\":\"" + escapeAiEventValue(power->getName()) + "\","
+		"\"targetPlayer\":" + std::to_string(playerNdx) + ","
+		"\"x\":" + std::to_string((int)retPos->x) + ","
+		"\"y\":" + std::to_string((int)retPos->y) + ","
+		"\"radius\":" + std::to_string((int)weaponRadius));
+	return foundTarget;
 
 }
 
