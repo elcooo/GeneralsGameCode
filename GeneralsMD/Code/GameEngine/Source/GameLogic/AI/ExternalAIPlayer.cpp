@@ -125,6 +125,38 @@ static void appendExternalAiEvent(Player *player, const char *eventName, const s
 	fclose(fp);
 }
 
+static Object *findOwnedProductionFactory(Player *player, const ThingTemplate *unitTemplate, Bool busyOK)
+{
+	if (player == nullptr || unitTemplate == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
+		return nullptr;
+
+	Object *busyFactory = nullptr;
+	for (Object *obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject())
+	{
+		if (obj->getControllingPlayer() != player)
+			continue;
+		if (obj->isEffectivelyDead())
+			continue;
+		if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+			continue;
+		if (obj->testStatus(OBJECT_STATUS_SOLD))
+			continue;
+
+		ProductionUpdateInterface *production = obj->getProductionUpdateInterface();
+		if (!production)
+			continue;
+		if (TheBuildAssistant->isPossibleToMakeUnit(obj, unitTemplate) == FALSE)
+			continue;
+
+		if (production->getProductionCount() == 0)
+			return obj;
+		if (busyOK)
+			busyFactory = obj;
+	}
+
+	return busyOK ? busyFactory : nullptr;
+}
+
 static Object *findOwnedCommandCenterOrStructure(Player *player)
 {
 	if (!player || !TheGameLogic)
@@ -474,6 +506,8 @@ Bool ExternalAIPlayer::queueExternalUnit(const AsciiString &thingName)
 		return false;
 
 	Object *factory = findFactory(unitTemplate, true);
+	if (!factory)
+		factory = findOwnedProductionFactory(m_player, unitTemplate, true);
 	if (!factory)
 	{
 		appendExternalAiEvent(
